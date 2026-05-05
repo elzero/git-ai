@@ -56,9 +56,7 @@ pub fn handle_notes_migrate(args: &[String]) {
 
     // Skip if not authenticated.
     if !client.is_logged_in() && !client.has_api_key() {
-        eprintln!(
-            "error: not authenticated. Log in first with `git-ai login` or set an API key."
-        );
+        eprintln!("error: not authenticated. Log in first with `git-ai login` or set an API key.");
         std::process::exit(1);
     }
 
@@ -189,7 +187,9 @@ pub fn handle_notes_migrate(args: &[String]) {
 }
 
 /// Run `git notes --ref=ai list` and return `(blob_sha, commit_sha)` pairs.
-fn list_notes(repo: &crate::git::repository::Repository) -> Result<Vec<(String, String)>, GitAiError> {
+fn list_notes(
+    repo: &crate::git::repository::Repository,
+) -> Result<Vec<(String, String)>, GitAiError> {
     use crate::git::repository::exec_git;
 
     let mut args = repo.global_args_for_exec();
@@ -199,9 +199,8 @@ fn list_notes(repo: &crate::git::repository::Repository) -> Result<Vec<(String, 
         "list".to_string(),
     ]);
 
-    let output = exec_git(&args).map_err(|e| {
-        GitAiError::Generic(format!("git notes --ref=ai list failed: {}", e))
-    })?;
+    let output = exec_git(&args)
+        .map_err(|e| GitAiError::Generic(format!("git notes --ref=ai list failed: {}", e)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -267,14 +266,17 @@ fn cat_file_batch(
         })?;
         for sha in blob_shas {
             writeln!(stdin, "{}", sha).map_err(|e| {
-                GitAiError::Generic(format!("failed to write to git cat-file --batch stdin: {}", e))
+                GitAiError::Generic(format!(
+                    "failed to write to git cat-file --batch stdin: {}",
+                    e
+                ))
             })?;
         }
     } // stdin is dropped here, closing the pipe and signalling EOF.
 
-    let output = child.wait_with_output().map_err(|e| {
-        GitAiError::Generic(format!("git cat-file --batch failed: {}", e))
-    })?;
+    let output = child
+        .wait_with_output()
+        .map_err(|e| GitAiError::Generic(format!("git cat-file --batch failed: {}", e)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -374,7 +376,9 @@ mod tests {
         message: &str,
         parent: Option<&git2::Commit>,
     ) -> git2::Oid {
-        let _f = repo.write_file(filename, content, false).expect("write file");
+        let _f = repo
+            .write_file(filename, content, false)
+            .expect("write file");
         let mut index = repo.repo().index().expect("index");
         index
             .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
@@ -397,16 +401,8 @@ mod tests {
 
     /// Add a git note to `refs/notes/ai` for the given commit SHA.
     fn add_git_note(repo: &TmpRepo, commit_sha: &str, note: &str) {
-        repo.git_command(&[
-            "notes",
-            "--ref=ai",
-            "add",
-            "-f",
-            "-m",
-            note,
-            commit_sha,
-        ])
-        .expect("git notes add");
+        repo.git_command(&["notes", "--ref=ai", "add", "-f", "-m", note, commit_sha])
+            .expect("git notes add");
     }
 
     /// Integration test:
@@ -429,15 +425,17 @@ mod tests {
 
         let sha1 = make_commit(&repo, "file1.txt", "hello", "commit 1", None).to_string();
         let sha2 = {
-            let parent = repo.repo().find_commit(
-                git2::Oid::from_str(&sha1).expect("oid1")
-            ).expect("parent1");
+            let parent = repo
+                .repo()
+                .find_commit(git2::Oid::from_str(&sha1).expect("oid1"))
+                .expect("parent1");
             make_commit(&repo, "file2.txt", "world", "commit 2", Some(&parent)).to_string()
         };
         let sha3 = {
-            let parent = repo.repo().find_commit(
-                git2::Oid::from_str(&sha2).expect("oid2")
-            ).expect("parent2");
+            let parent = repo
+                .repo()
+                .find_commit(git2::Oid::from_str(&sha2).expect("oid2"))
+                .expect("parent2");
             make_commit(&repo, "file3.txt", "foo", "commit 3", Some(&parent)).to_string()
         };
 
@@ -499,7 +497,9 @@ mod tests {
                 content: content.clone(),
             })
             .collect();
-        let request = NotesUploadRequest { entries: note_entries };
+        let request = NotesUploadRequest {
+            entries: note_entries,
+        };
         let response = client.upload_notes(request).expect("upload_notes");
         assert_eq!(response.success_count, 3);
         assert_eq!(response.failure_count, 0);
@@ -508,7 +508,8 @@ mod tests {
         let db = NotesDatabase::global().expect("global db");
         {
             let mut lock = db.lock().expect("lock");
-            lock.cache_synced_notes(&entries).expect("cache_synced_notes");
+            lock.cache_synced_notes(&entries)
+                .expect("cache_synced_notes");
         }
 
         // --- Verify all three notes are in notes-db with synced = 1 ---
@@ -516,11 +517,7 @@ mod tests {
         let shas = [sha1.as_str(), sha2.as_str(), sha3.as_str()];
         for sha in &shas {
             let content = lock.get_note(sha).expect("get_note");
-            assert!(
-                content.is_some(),
-                "note for {} should be in notes-db",
-                sha
-            );
+            assert!(content.is_some(), "note for {} should be in notes-db", sha);
         }
 
         // None of them should appear in dequeue_pending (synced = 1).
@@ -534,7 +531,10 @@ mod tests {
         assert!(
             migrated_pending.is_empty(),
             "migrated notes must not appear in dequeue_pending: {:?}",
-            migrated_pending.iter().map(|p| &p.commit_sha).collect::<Vec<_>>()
+            migrated_pending
+                .iter()
+                .map(|p| &p.commit_sha)
+                .collect::<Vec<_>>()
         );
 
         // --- Verify the mock was called ---
@@ -555,15 +555,22 @@ mod tests {
         // Create a commit so HEAD exists (list_notes on an empty repo might error differently).
         let _f = repo.write_file("a.txt", "a", false).expect("write file");
         let mut index = repo.repo().index().expect("index");
-        index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None).expect("add");
+        index
+            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+            .expect("add");
         index.write().expect("write");
         let tree_id = index.write_tree().expect("write_tree");
         let tree = repo.repo().find_tree(tree_id).expect("find_tree");
         let sig = git2::Signature::now("T", "t@test.com").expect("sig");
-        repo.repo().commit(Some("HEAD"), &sig, &sig, "c", &tree, &[]).expect("commit");
+        repo.repo()
+            .commit(Some("HEAD"), &sig, &sig, "c", &tree, &[])
+            .expect("commit");
 
         let pairs = list_notes(repo.gitai_repo()).expect("list_notes");
-        assert!(pairs.is_empty(), "no notes should be listed for a fresh repo");
+        assert!(
+            pairs.is_empty(),
+            "no notes should be listed for a fresh repo"
+        );
     }
 
     /// Unit test: `cat_file_batch` with empty input returns empty map.

@@ -6,8 +6,7 @@ use crate::git::authorship_traversal::{
 };
 use crate::git::notes_api::{
     read_authorship_v3 as get_reference_as_authorship_log_v3,
-    read_note_blob_oids as note_blob_oids_for_commits,
-    write_note as notes_add,
+    read_note_blob_oids as note_blob_oids_for_commits, write_note as notes_add,
     write_notes_batch as notes_add_batch,
 };
 use crate::git::repository::{CommitRange, Repository, exec_git, exec_git_stdin};

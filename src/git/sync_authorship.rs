@@ -237,12 +237,8 @@ const PUSH_NOTES_MAX_ATTEMPTS: usize = 3;
 pub fn push_authorship_notes(repository: &Repository, remote_name: &str) -> Result<(), GitAiError> {
     // Belt-and-suspenders: when the HTTP backend is active, notes are not stored
     // in refs/notes/ai so there is nothing to push.
-    if crate::config::Config::get().notes_backend_kind()
-        == crate::config::NotesBackendKind::Http
-    {
-        tracing::debug!(
-            "push_authorship_notes: skipping refs/notes/ai push (Http backend active)"
-        );
+    if crate::config::Config::get().notes_backend_kind() == crate::config::NotesBackendKind::Http {
+        tracing::debug!("push_authorship_notes: skipping refs/notes/ai push (Http backend active)");
         return Ok(());
     }
 

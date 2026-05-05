@@ -6,7 +6,9 @@
 //! `has_api_key()` is true (matching the CAS pattern).
 
 use crate::api::client::ApiClient;
-use crate::api::types::{ApiErrorResponse, NotesReadResponse, NotesUploadRequest, NotesUploadResponse};
+use crate::api::types::{
+    ApiErrorResponse, NotesReadResponse, NotesUploadRequest, NotesUploadResponse,
+};
 use crate::error::GitAiError;
 
 impl ApiClient {
@@ -18,7 +20,10 @@ impl ApiClient {
     /// # Returns
     /// * `Ok(NotesUploadResponse)` - Success response with counts
     /// * `Err(GitAiError)` - On network or server errors
-    pub fn upload_notes(&self, request: NotesUploadRequest) -> Result<NotesUploadResponse, GitAiError> {
+    pub fn upload_notes(
+        &self,
+        request: NotesUploadRequest,
+    ) -> Result<NotesUploadResponse, GitAiError> {
         let response = self.context().post_json("/worker/notes/upload", &request)?;
         let status_code = response.status_code;
 
@@ -29,12 +34,11 @@ impl ApiClient {
         match status_code {
             200 => serde_json::from_str(body).map_err(GitAiError::JsonError),
             400 => {
-                let err: ApiErrorResponse = serde_json::from_str(body).unwrap_or_else(|_| {
-                    ApiErrorResponse {
+                let err: ApiErrorResponse =
+                    serde_json::from_str(body).unwrap_or_else(|_| ApiErrorResponse {
                         error: "Invalid request body".to_string(),
                         details: Some(serde_json::Value::String(body.to_string())),
-                    }
-                });
+                    });
                 Err(GitAiError::Generic(format!("Bad Request: {}", err.error)))
             }
             _ => Err(GitAiError::Generic(format!(
@@ -101,7 +105,11 @@ mod tests {
         let result = client.read_notes(&["not-a-hex-sha"]);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("non-hex"), "error should mention non-hex: {}", err);
+        assert!(
+            err.contains("non-hex"),
+            "error should mention non-hex: {}",
+            err
+        );
     }
 
     #[test]
@@ -128,12 +136,10 @@ mod tests {
     #[test]
     fn test_notes_upload_request_serialization() {
         let request = NotesUploadRequest {
-            entries: vec![
-                NoteEntry {
-                    commit_sha: "abc123".to_string(),
-                    content: "authorship data".to_string(),
-                },
-            ],
+            entries: vec![NoteEntry {
+                commit_sha: "abc123".to_string(),
+                content: "authorship data".to_string(),
+            }],
         };
 
         let json = serde_json::to_string(&request).unwrap();

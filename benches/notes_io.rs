@@ -80,7 +80,8 @@ const MEASUREMENT_TIME_SECS: u64 = 10;
 // Constants
 // ---------------------------------------------------------------------------
 
-const NOTE_CONTENT: &str = r#"{"v":3,"checkpoints":[{"author":"alice","kind":"human","entries":[]}]}"#;
+const NOTE_CONTENT: &str =
+    r#"{"v":3,"checkpoints":[{"author":"alice","kind":"human","entries":[]}]}"#;
 const BATCH_SIZE: usize = 100;
 const COMMITS_CHECK_SIZE: usize = 500;
 const REBASE_COMMIT_COUNT: usize = 50;
@@ -121,8 +122,8 @@ fn ensure_notes_db_initialized() {
 
 fn create_commits_git2(repo: &git2::Repository, count: usize) -> Vec<String> {
     let mut shas = Vec::with_capacity(count);
-    let sig = git2::Signature::now("Bench User", "bench@bench.local")
-        .expect("bench: create signature");
+    let sig =
+        git2::Signature::now("Bench User", "bench@bench.local").expect("bench: create signature");
 
     for i in 0..count {
         let blob_id = repo
@@ -163,7 +164,8 @@ fn create_commits_git2(repo: &git2::Repository, count: usize) -> Vec<String> {
 fn collect_all_commit_shas(repo: &git2::Repository) -> Vec<String> {
     let mut walk = repo.revwalk().expect("bench: revwalk");
     walk.push_head().expect("bench: push head");
-    walk.set_sorting(git2::Sort::TOPOLOGICAL).expect("bench: set sort");
+    walk.set_sorting(git2::Sort::TOPOLOGICAL)
+        .expect("bench: set sort");
     walk.filter_map(|id| id.ok().map(|id| id.to_string()))
         .collect()
 }
@@ -233,17 +235,14 @@ fn bench_write_single(c: &mut Criterion) {
     );
 
     // --- http backend (SQLite upsert only; async flush is excluded) ---
-    group.bench_with_input(
-        BenchmarkId::new("http", "1_note"),
-        &target_sha,
-        |b, sha| {
-            let db = NotesDatabase::global().expect("get notes-db");
-            b.iter(|| {
-                let mut lock = db.lock().expect("lock notes-db");
-                lock.upsert_note(sha, NOTE_CONTENT).expect("upsert_note failed");
-            });
-        },
-    );
+    group.bench_with_input(BenchmarkId::new("http", "1_note"), &target_sha, |b, sha| {
+        let db = NotesDatabase::global().expect("get notes-db");
+        b.iter(|| {
+            let mut lock = db.lock().expect("lock notes-db");
+            lock.upsert_note(sha, NOTE_CONTENT)
+                .expect("upsert_note failed");
+        });
+    });
 
     group.finish();
 }
@@ -280,7 +279,8 @@ fn bench_write_batch_100(c: &mut Criterion) {
         let db = NotesDatabase::global().expect("get notes-db");
         b.iter(|| {
             let mut lock = db.lock().expect("lock notes-db");
-            lock.upsert_notes_batch(&batch).expect("upsert_notes_batch failed");
+            lock.upsert_notes_batch(&batch)
+                .expect("upsert_notes_batch failed");
         });
     });
 
@@ -312,17 +312,13 @@ fn bench_read_single_hot(c: &mut Criterion) {
     );
 
     // --- http backend (cache hit — no git fallback) ---
-    group.bench_with_input(
-        BenchmarkId::new("http", "hot_sha"),
-        &hot_sha,
-        |b, sha| {
-            let db = NotesDatabase::global().expect("get notes-db");
-            b.iter(|| {
-                let lock = db.lock().expect("lock notes-db");
-                let _ = lock.get_note(sha).expect("get_note failed");
-            });
-        },
-    );
+    group.bench_with_input(BenchmarkId::new("http", "hot_sha"), &hot_sha, |b, sha| {
+        let db = NotesDatabase::global().expect("get notes-db");
+        b.iter(|| {
+            let lock = db.lock().expect("lock notes-db");
+            let _ = lock.get_note(sha).expect("get_note failed");
+        });
+    });
 
     group.finish();
 }
@@ -360,17 +356,13 @@ fn bench_read_single_cold(c: &mut Criterion) {
     );
 
     // --- http backend (cache-miss lookup only; fallback = git_notes baseline) ---
-    group.bench_with_input(
-        BenchmarkId::new("http", "cold_sha"),
-        &cold_sha,
-        |b, sha| {
-            let db = NotesDatabase::global().expect("get notes-db");
-            b.iter(|| {
-                let lock = db.lock().expect("lock notes-db");
-                let _ = lock.get_note(sha).expect("get_note failed");
-            });
-        },
-    );
+    group.bench_with_input(BenchmarkId::new("http", "cold_sha"), &cold_sha, |b, sha| {
+        let db = NotesDatabase::global().expect("get notes-db");
+        b.iter(|| {
+            let lock = db.lock().expect("lock notes-db");
+            let _ = lock.get_note(sha).expect("get_note failed");
+        });
+    });
 
     group.finish();
 }
@@ -392,8 +384,9 @@ fn bench_read_batch_100(c: &mut Criterion) {
     // --- git_notes backend ---
     group.bench_function(BenchmarkId::new("git_notes", "100_reads"), |b| {
         b.iter(|| {
-            let _ = git_ai::git::refs::note_blob_oids_for_commits(bench.repo.gitai_repo(), &batch_shas)
-                .expect("note_blob_oids_for_commits failed");
+            let _ =
+                git_ai::git::refs::note_blob_oids_for_commits(bench.repo.gitai_repo(), &batch_shas)
+                    .expect("note_blob_oids_for_commits failed");
         });
     });
 
@@ -418,7 +411,12 @@ fn bench_commits_with_notes_500(c: &mut Criterion) {
     ensure_notes_db_initialized();
     let bench = BenchRepo::new(COMMITS_CHECK_SIZE);
 
-    let check_shas: Vec<String> = bench.shas.iter().take(COMMITS_CHECK_SIZE).cloned().collect();
+    let check_shas: Vec<String> = bench
+        .shas
+        .iter()
+        .take(COMMITS_CHECK_SIZE)
+        .cloned()
+        .collect();
 
     let mut group = c.benchmark_group("commits_with_notes_500");
     group.sample_size(SAMPLE_SIZE);
@@ -427,8 +425,11 @@ fn bench_commits_with_notes_500(c: &mut Criterion) {
     // --- git_notes backend ---
     group.bench_function(BenchmarkId::new("git_notes", "500_shas"), |b| {
         b.iter(|| {
-            let _ = git_ai::git::refs::commits_with_authorship_notes(bench.repo.gitai_repo(), &check_shas)
-                .expect("commits_with_authorship_notes failed");
+            let _ = git_ai::git::refs::commits_with_authorship_notes(
+                bench.repo.gitai_repo(),
+                &check_shas,
+            )
+            .expect("commits_with_authorship_notes failed");
         });
     });
 
@@ -478,7 +479,8 @@ fn bench_rebase_50_commits(c: &mut Criterion) {
         b.iter_batched(
             || setup_rebase_repo(REBASE_COMMIT_COUNT),
             |(repo, feature_branch, main_branch)| {
-                repo.switch_branch(&feature_branch).expect("switch to feature");
+                repo.switch_branch(&feature_branch)
+                    .expect("switch to feature");
                 repo.rebase_onto(&feature_branch, &main_branch)
                     .expect("rebase failed");
             },
@@ -509,7 +511,8 @@ fn bench_rebase_50_commits(c: &mut Criterion) {
                 (repo, fb, mb)
             },
             |(repo, feature_branch, main_branch)| {
-                repo.switch_branch(&feature_branch).expect("switch to feature");
+                repo.switch_branch(&feature_branch)
+                    .expect("switch to feature");
                 repo.rebase_onto(&feature_branch, &main_branch)
                     .expect("rebase failed");
             },
@@ -539,7 +542,8 @@ fn setup_rebase_repo(feature_commits: usize) -> (TmpRepo, String, String) {
         .expect("base commit");
 
     // Create main branch (branching from base commit).
-    repo.create_branch("bench_main").expect("create main branch");
+    repo.create_branch("bench_main")
+        .expect("create main branch");
 
     // Feature branch also branches from base.
     repo.create_branch("bench_feature")

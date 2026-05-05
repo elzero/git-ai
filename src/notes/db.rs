@@ -106,9 +106,8 @@ impl NotesDatabase {
             return Ok(PathBuf::from(test_path));
         }
 
-        let home = dirs::home_dir().ok_or_else(|| {
-            GitAiError::Generic("Could not determine home directory".to_string())
-        })?;
+        let home = dirs::home_dir()
+            .ok_or_else(|| GitAiError::Generic("Could not determine home directory".to_string()))?;
         Ok(home.join(".git-ai").join("internal").join("notes-db"))
     }
 
@@ -432,8 +431,10 @@ impl NotesDatabase {
             "SELECT commit_sha, content FROM notes WHERE commit_sha IN ({})",
             placeholders
         );
-        let params_vec: Vec<&dyn rusqlite::ToSql> =
-            commit_shas.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let params_vec: Vec<&dyn rusqlite::ToSql> = commit_shas
+            .iter()
+            .map(|s| s as &dyn rusqlite::ToSql)
+            .collect();
 
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params_vec.as_slice(), |row| {
@@ -513,10 +514,7 @@ mod tests {
         let (db, _tmp) = create_test_db();
 
         // PRAGMA table_info returns one row per column
-        let mut stmt = db
-            .conn
-            .prepare("PRAGMA table_info(notes)")
-            .unwrap();
+        let mut stmt = db.conn.prepare("PRAGMA table_info(notes)").unwrap();
         let column_names: Vec<String> = stmt
             .query_map([], |row| row.get::<_, String>(1))
             .unwrap()
@@ -569,10 +567,7 @@ mod tests {
         db.upsert_note("sha1", "original").unwrap();
         // Mark as synced manually
         db.conn
-            .execute(
-                "UPDATE notes SET synced = 1 WHERE commit_sha = 'sha1'",
-                [],
-            )
+            .execute("UPDATE notes SET synced = 1 WHERE commit_sha = 'sha1'", [])
             .unwrap();
 
         // Upsert with different content → should reset synced
@@ -594,10 +589,7 @@ mod tests {
 
         db.upsert_note("sha1", "same content").unwrap();
         db.conn
-            .execute(
-                "UPDATE notes SET synced = 1 WHERE commit_sha = 'sha1'",
-                [],
-            )
+            .execute("UPDATE notes SET synced = 1 WHERE commit_sha = 'sha1'", [])
             .unwrap();
 
         // Upsert with identical content → synced should stay 1
@@ -610,7 +602,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(synced, 1, "synced should be preserved when content is unchanged");
+        assert_eq!(
+            synced, 1,
+            "synced should be preserved when content is unchanged"
+        );
     }
 
     // --- Dequeue / mark_synced round-trip ---

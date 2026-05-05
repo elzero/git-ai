@@ -341,10 +341,7 @@ fn show_all_config() -> Result<(), String> {
         if let Some(ref url) = nb.backend_url {
             nb_map.insert("backend_url".to_string(), Value::String(url.clone()));
         }
-        effective_config.insert(
-            "notes_backend".to_string(),
-            Value::Object(nb_map),
-        );
+        effective_config.insert("notes_backend".to_string(), Value::Object(nb_map));
     }
 
     let json = serde_json::to_string_pretty(&effective_config)
@@ -493,8 +490,10 @@ fn get_config_value(key: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    Err("Nested keys are only supported for feature_flags, git_ai_hooks, and notes_backend"
-        .to_string())
+    Err(
+        "Nested keys are only supported for feature_flags, git_ai_hooks, and notes_backend"
+            .to_string(),
+    )
 }
 
 fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String> {
@@ -974,10 +973,7 @@ fn unset_config_value(key: &str) -> Result<(), String> {
             );
         }
         let field = key_path[1].as_str();
-        let mut backend = file_config
-            .notes_backend
-            .clone()
-            .unwrap_or_default();
+        let mut backend = file_config.notes_backend.clone().unwrap_or_default();
         match field {
             "kind" => {
                 let old = backend.kind;

@@ -1900,7 +1900,10 @@ mod tests {
         // Full file config containing notes_backend nested object
         let json = r#"{"notes_backend": {"kind": "http", "backend_url": "https://x"}}"#;
         let parsed: FileConfig = serde_json::from_str(json).unwrap();
-        let nb = parsed.notes_backend.clone().expect("notes_backend should be set");
+        let nb = parsed
+            .notes_backend
+            .clone()
+            .expect("notes_backend should be set");
         assert_eq!(nb.kind, NotesBackendKind::Http);
         assert_eq!(nb.backend_url.as_deref(), Some("https://x"));
 
@@ -1972,7 +1975,10 @@ mod tests {
             Some(v) => unsafe { std::env::set_var("GIT_AI_NOTES_BACKEND_KIND", v) },
             None => unsafe { std::env::remove_var("GIT_AI_NOTES_BACKEND_KIND") },
         }
-        assert_eq!(result, NotesBackendKind::Http,
-            "GIT_AI_NOTES_BACKEND_KIND=http should override the default git_notes");
+        assert_eq!(
+            result,
+            NotesBackendKind::Http,
+            "GIT_AI_NOTES_BACKEND_KIND=http should override the default git_notes"
+        );
     }
 }

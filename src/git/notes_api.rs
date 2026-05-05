@@ -25,7 +25,10 @@ pub fn write_note(repo: &Repository, commit_sha: &str, content: &str) -> Result<
     }
 }
 
-pub fn write_notes_batch(repo: &Repository, entries: &[(String, String)]) -> Result<(), GitAiError> {
+pub fn write_notes_batch(
+    repo: &Repository,
+    entries: &[(String, String)],
+) -> Result<(), GitAiError> {
     if entries.is_empty() {
         return Ok(());
     }
@@ -61,7 +64,10 @@ pub fn read_authorship(repo: &Repository, commit_sha: &str) -> Option<Authorship
     }
 }
 
-pub fn read_authorship_v3(repo: &Repository, commit_sha: &str) -> Result<AuthorshipLog, GitAiError> {
+pub fn read_authorship_v3(
+    repo: &Repository,
+    commit_sha: &str,
+) -> Result<AuthorshipLog, GitAiError> {
     match Config::get().notes_backend_kind() {
         NotesBackendKind::Http => {
             if let Some(content) = http_read_note(commit_sha) {
@@ -344,7 +350,10 @@ pub fn warm_cache_for_remote(repo: &Repository, _remote: &str) -> Result<(), Git
             Ok(db) => match db.lock() {
                 Ok(lock) => {
                     let refs: Vec<&str> = all_shas.iter().map(|s| s.as_str()).collect();
-                    lock.get_notes(&refs).unwrap_or_default().into_keys().collect()
+                    lock.get_notes(&refs)
+                        .unwrap_or_default()
+                        .into_keys()
+                        .collect()
                 }
                 Err(e) => {
                     tracing::warn!("warm_cache_for_remote: DB lock poisoned: {}", e);
@@ -495,8 +504,7 @@ mod tests {
         }
 
         // Write directly via http helper (no repo needed).
-        http_write_note("abc123def456abc123def456abc123def456abc1", "test content")
-            .expect("write");
+        http_write_note("abc123def456abc123def456abc123def456abc1", "test content").expect("write");
 
         // Read back from cache.
         let content = http_read_note("abc123def456abc123def456abc123def456abc1");
@@ -507,8 +515,10 @@ mod tests {
         let mut lock = db.lock().expect("lock");
         let pending = lock.dequeue_pending(10).expect("dequeue");
         assert!(
-            pending.iter().any(|p| p.commit_sha == "abc123def456abc123def456abc123def456abc1"
-                && p.content == "test content"),
+            pending.iter().any(
+                |p| p.commit_sha == "abc123def456abc123def456abc123def456abc1"
+                    && p.content == "test content"
+            ),
             "expected pending row in notes-db"
         );
 
@@ -577,10 +587,7 @@ mod tests {
         let result: Result<HashMap<String, String>, _> = match kind {
             crate::config::NotesBackendKind::Http => Ok(HashMap::new()),
             crate::config::NotesBackendKind::GitNotes => {
-                crate::git::refs::note_blob_oids_for_commits(
-                    tmp.gitai_repo(),
-                    &["abc".to_string()],
-                )
+                crate::git::refs::note_blob_oids_for_commits(tmp.gitai_repo(), &["abc".to_string()])
             }
         };
 
@@ -616,11 +623,15 @@ mod tests {
         let repo = TmpRepo::new().expect("TmpRepo::new");
 
         // Create a real commit so we have a valid SHA.
-        let f = repo.write_file("a.txt", "hello", false).expect("write file");
+        let f = repo
+            .write_file("a.txt", "hello", false)
+            .expect("write file");
         let _ = f; // keep alive
         let sha = {
             let mut index = repo.repo().index().expect("index");
-            index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None).expect("add");
+            index
+                .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+                .expect("add");
             index.write().expect("write index");
             let tree_id = index.write_tree().expect("write tree");
             let tree = repo.repo().find_tree(tree_id).expect("find tree");
@@ -649,7 +660,12 @@ mod tests {
 
         // Confirm `git notes --ref=ai show <sha>` returns nothing.
         let mut args = repo.gitai_repo().global_args_for_exec();
-        args.extend(["notes".to_string(), "--ref=ai".to_string(), "show".to_string(), sha.clone()]);
+        args.extend([
+            "notes".to_string(),
+            "--ref=ai".to_string(),
+            "show".to_string(),
+            sha.clone(),
+        ]);
         let result = exec_git(&args);
         assert!(
             result.is_err(),
@@ -679,11 +695,15 @@ mod tests {
         let repo = TmpRepo::new().expect("TmpRepo::new");
 
         // Create a real commit.
-        let f = repo.write_file("b.txt", "world", false).expect("write file");
+        let f = repo
+            .write_file("b.txt", "world", false)
+            .expect("write file");
         let _ = f;
         let sha = {
             let mut index = repo.repo().index().expect("index");
-            index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None).expect("add");
+            index
+                .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+                .expect("add");
             index.write().expect("write index");
             let tree_id = index.write_tree().expect("write tree");
             let tree = repo.repo().find_tree(tree_id).expect("tree");
@@ -698,8 +718,7 @@ mod tests {
         http_write_note(&sha, "display-note-content").expect("write note");
 
         // Materialize the cache into refs/notes/ai-display.
-        let count = materialize_notes_for_display(repo.gitai_repo(), 50)
-            .expect("materialize");
+        let count = materialize_notes_for_display(repo.gitai_repo(), 50).expect("materialize");
         assert_eq!(count, 1, "should have materialized 1 note");
 
         // Confirm git can read the note from refs/notes/ai-display.
@@ -809,9 +828,13 @@ mod tests {
         let repo = TmpRepo::new().expect("TmpRepo::new");
 
         let sha1 = {
-            let _f = repo.write_file("warm1.txt", "warm1", false).expect("write file");
+            let _f = repo
+                .write_file("warm1.txt", "warm1", false)
+                .expect("write file");
             let mut index = repo.repo().index().expect("index");
-            index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None).expect("add");
+            index
+                .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+                .expect("add");
             index.write().expect("write index");
             let tree_id = index.write_tree().expect("write tree");
             let tree = repo.repo().find_tree(tree_id).expect("tree");
@@ -823,14 +846,23 @@ mod tests {
         };
 
         let sha2 = {
-            let _f = repo.write_file("warm2.txt", "warm2", false).expect("write file");
+            let _f = repo
+                .write_file("warm2.txt", "warm2", false)
+                .expect("write file");
             let mut index = repo.repo().index().expect("index");
-            index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None).expect("add");
+            index
+                .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+                .expect("add");
             index.write().expect("write index");
             let tree_id = index.write_tree().expect("write tree");
             let tree = repo.repo().find_tree(tree_id).expect("tree");
             let sig = git2::Signature::now("T", "t@t.com").expect("sig");
-            let parent = repo.repo().head().expect("head").peel_to_commit().expect("peel");
+            let parent = repo
+                .repo()
+                .head()
+                .expect("head")
+                .peel_to_commit()
+                .expect("peel");
             repo.repo()
                 .commit(Some("HEAD"), &sig, &sig, "warm-commit-2", &tree, &[&parent])
                 .expect("commit")
@@ -848,7 +880,10 @@ mod tests {
         .to_string();
 
         let _mock = server
-            .mock("GET", mockito::Matcher::Regex(r"^/worker/notes/".to_string()))
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"^/worker/notes/".to_string()),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(&notes_json)
@@ -895,7 +930,10 @@ mod tests {
         assert!(
             warm_pending.is_empty(),
             "cache_synced rows must not appear in dequeue_pending: {:?}",
-            warm_pending.iter().map(|p| &p.commit_sha).collect::<Vec<_>>()
+            warm_pending
+                .iter()
+                .map(|p| &p.commit_sha)
+                .collect::<Vec<_>>()
         );
 
         // Cleanup.
@@ -936,9 +974,13 @@ mod tests {
         let repo = TmpRepo::new().expect("TmpRepo::new");
 
         let sha1 = {
-            let _f = repo.write_file("skip1.txt", "s1", false).expect("write file");
+            let _f = repo
+                .write_file("skip1.txt", "s1", false)
+                .expect("write file");
             let mut index = repo.repo().index().expect("index");
-            index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None).expect("add");
+            index
+                .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+                .expect("add");
             index.write().expect("write index");
             let tree_id = index.write_tree().expect("write tree");
             let tree = repo.repo().find_tree(tree_id).expect("tree");
@@ -950,14 +992,23 @@ mod tests {
         };
 
         let sha2 = {
-            let _f = repo.write_file("skip2.txt", "s2", false).expect("write file");
+            let _f = repo
+                .write_file("skip2.txt", "s2", false)
+                .expect("write file");
             let mut index = repo.repo().index().expect("index");
-            index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None).expect("add");
+            index
+                .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+                .expect("add");
             index.write().expect("write index");
             let tree_id = index.write_tree().expect("write tree");
             let tree = repo.repo().find_tree(tree_id).expect("tree");
             let sig = git2::Signature::now("T", "t@t.com").expect("sig");
-            let parent = repo.repo().head().expect("head").peel_to_commit().expect("peel");
+            let parent = repo
+                .repo()
+                .head()
+                .expect("head")
+                .peel_to_commit()
+                .expect("peel");
             repo.repo()
                 .commit(Some("HEAD"), &sig, &sig, "skip-c2", &tree, &[&parent])
                 .expect("commit")
@@ -996,7 +1047,10 @@ mod tests {
         let mut server = mockito::Server::new();
         // Mock A: exact query with only sha2.
         let _mock_ok = server
-            .mock("GET", mockito::Matcher::Regex(r"^/worker/notes/".to_string()))
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"^/worker/notes/".to_string()),
+            )
             .match_query(mockito::Matcher::Exact(exact_sha2_query))
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -1004,7 +1058,10 @@ mod tests {
             .create();
         // Mock B: fallback → 500.
         let _mock_fallback = server
-            .mock("GET", mockito::Matcher::Regex(r"^/worker/notes/".to_string()))
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"^/worker/notes/".to_string()),
+            )
             .with_status(500)
             .with_body(r#"{"error":"unexpected request with sha1 in query"}"#)
             .create();

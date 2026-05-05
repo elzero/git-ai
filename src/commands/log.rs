@@ -157,9 +157,7 @@ pub fn handle_log(args: &[String]) -> std::process::ExitStatus {
     // When using the HTTP backend, materialize notes into refs/notes/ai-display
     // so git log can render them.
     let use_display_ref = config::Config::get().notes_backend_kind() == NotesBackendKind::Http;
-    if use_display_ref
-        && let Some(repo) = try_open_repo_for_log(&global_args)
-    {
+    if use_display_ref && let Some(repo) = try_open_repo_for_log(&global_args) {
         match crate::git::notes_api::materialize_notes_for_display(&repo, 500) {
             Ok(count) => {
                 tracing::debug!(count, "log: materialized notes into refs/notes/ai-display");
