@@ -19,6 +19,7 @@
 
 import type { Plugin } from "@opencode-ai/plugin"
 import { spawn } from "child_process"
+import { existsSync, statSync } from "fs"
 import { dirname, isAbsolute, join } from "path"
 
 // Absolute path to git-ai binary, replaced at install time by `git-ai install-hooks`
@@ -240,12 +241,18 @@ export const GitAiPlugin: Plugin = async (ctx) => {
   // Track pending calls by callID so we can reference them in the after hook
   const pendingCalls = new Map<string, { repoDir: string; sessionID: string; toolInput: unknown }>()
 
-  // Helper to find git repo root from a file path
-  const findGitRepo = async (pathHint: string): Promise<string | null> => {
-    const candidateDirs: string[] = []
+  const nearestExistingDirectory = (pathHint: string): string | null => {
     let candidate = pathHint
-    while (candidate && !candidateDirs.includes(candidate)) {
-      candidateDirs.push(candidate)
+    while (candidate) {
+      try {
+        if (existsSync(candidate)) {
+          const stat = statSync(candidate)
+          return stat.isDirectory() ? candidate : dirname(candidate)
+        }
+      } catch (error) {
+        debugLog(`failed to stat path while resolving git repo from ${candidate}`, error)
+      }
+
       const parent = dirname(candidate)
       if (parent === candidate) {
         break
@@ -253,17 +260,24 @@ export const GitAiPlugin: Plugin = async (ctx) => {
       candidate = parent
     }
 
-    for (const dir of candidateDirs) {
-      try {
-        const result = await runCommand("git", ["-C", dir, "rev-parse", "--show-toplevel"])
-        const repoRoot = result.stdout.trim()
-        if (repoRoot) {
-          return repoRoot
-        }
-      } catch (error) {
-        debugLog(`git repo lookup failed from ${dir}`, error)
-        // try next candidate
+    return null
+  }
+
+  // Helper to find git repo root from a file path or directory
+  const findGitRepo = async (pathHint: string): Promise<string | null> => {
+    const dir = nearestExistingDirectory(pathHint)
+    if (!dir) {
+      return null
+    }
+
+    try {
+      const result = await runCommand("git", ["-C", dir, "rev-parse", "--show-toplevel"])
+      const repoRoot = result.stdout.trim()
+      if (repoRoot) {
+        return repoRoot
       }
+    } catch (error) {
+      debugLog(`git repo lookup failed from ${dir}`, error)
     }
 
     return null
@@ -278,26 +292,34 @@ export const GitAiPlugin: Plugin = async (ctx) => {
   }
 
   const resolveRepoDir = async (filePaths: string[], cwd?: string): Promise<string | null> => {
+    const seenHints = new Set<string>()
+    const findGitRepoOnce = async (pathHint: string | undefined): Promise<string | null> => {
+      if (!pathHint || seenHints.has(pathHint)) {
+        return null
+      }
+
+      seenHints.add(pathHint)
+      return findGitRepo(pathHint)
+    }
+
     for (const filePath of filePaths) {
-      const repo = await findGitRepo(filePath)
+      const repo = await findGitRepoOnce(filePath)
       if (repo) {
         return repo
       }
     }
 
-    if (cwd) {
-      const fromCwd = await findGitRepo(cwd)
-      if (fromCwd) {
-        return fromCwd
-      }
+    const fromCwd = await findGitRepoOnce(cwd)
+    if (fromCwd) {
+      return fromCwd
     }
 
-    const fromDefaultCwd = await findGitRepo(defaultCwd)
+    const fromDefaultCwd = await findGitRepoOnce(defaultCwd)
     if (fromDefaultCwd) {
       return fromDefaultCwd
     }
 
-    const fromProcessCwd = await findGitRepo(process.cwd())
+    const fromProcessCwd = await findGitRepoOnce(process.cwd())
     if (fromProcessCwd) {
       return fromProcessCwd
     }
@@ -305,7 +327,7 @@ export const GitAiPlugin: Plugin = async (ctx) => {
     return null
   }
 
-  const extractMetadataFilePaths = (metadata: unknown): string[] => {
+  const extractMetadataFilePaths = (metadata: unknown, cwd?: string): string[] => {
     if (!metadata || typeof metadata !== "object") {
       return []
     }
@@ -323,7 +345,7 @@ export const GitAiPlugin: Plugin = async (ctx) => {
 
       const filePath = (file as { filePath?: unknown; path?: unknown }).filePath ?? (file as { path?: unknown }).path
       if (typeof filePath === "string") {
-        const normalized = normalizePath(filePath, defaultCwd)
+        const normalized = normalizePath(filePath, cwd ?? defaultCwd)
         if (normalized) {
           paths.add(normalized)
         }
@@ -421,20 +443,20 @@ export const GitAiPlugin: Plugin = async (ctx) => {
         const callInfo = pendingCalls.get(callID)
         pendingCalls.delete(callID)
 
-        const metadataFilePaths = extractMetadataFilePaths(output?.metadata ?? input.metadata)
-        const toolInput = callInfo?.toolInput ?? withMetadataFilePaths(input.args, metadataFilePaths)
-        const sessionID = callInfo?.sessionID ?? hookString(input.sessionID)
-        const toolCwd = resolveCwd(extractToolCwd(input.cwd ?? input.workdir, asRecord(input.args)))
-        const repoDir = callInfo?.repoDir ?? await resolveRepoDir(extractFilePaths(toolInput, toolCwd), toolCwd)
-        if (!repoDir) {
+        if (!callInfo) {
+          debugLog(`skipping post-tool checkpoint without matching pre-tool call for ${callID}`)
           return
         }
 
+        const toolCwd = resolveCwd(extractToolCwd(input.cwd ?? input.workdir, asRecord(input.args)))
+        const metadataFilePaths = extractMetadataFilePaths(output?.metadata ?? input.metadata, toolCwd)
+        const toolInput = withMetadataFilePaths(callInfo.toolInput, metadataFilePaths)
+
         const hookInput = JSON.stringify({
           hook_event_name: "PostToolUse",
-          session_id: sessionID,
+          session_id: callInfo.sessionID,
           tool_use_id: callID,
-          cwd: repoDir,
+          cwd: callInfo.repoDir,
           tool_name: toolName,
           tool_input: toolInput,
         })
