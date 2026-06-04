@@ -345,6 +345,7 @@ pub fn extract_otel_event_timestamp(event: &serde_json::Value) -> Option<u32> {
 mod tests {
     use super::*;
     use crate::streams::watermark::TimestampCursorWatermark;
+    use std::str::FromStr;
 
     fn create_test_otel_db() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
@@ -891,5 +892,128 @@ mod tests {
         // But end_time_ms=0 is NOT > 0, so it's excluded from the initial query
         assert_eq!(batch.events.len(), 1);
         assert_eq!(batch.events[0]["span"]["span_id"], "span-early");
+    }
+
+    #[test]
+    fn test_fractional_real_end_time_ms_no_infinite_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("traces.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE spans (
+                span_id TEXT PRIMARY KEY, trace_id TEXT NOT NULL, parent_span_id TEXT,
+                name TEXT NOT NULL, start_time_ms REAL NOT NULL, end_time_ms REAL NOT NULL,
+                status_code INTEGER NOT NULL DEFAULT 0, status_message TEXT,
+                operation_name TEXT, provider_name TEXT, agent_name TEXT, conversation_id TEXT,
+                request_model TEXT, response_model TEXT,
+                input_tokens INTEGER, output_tokens INTEGER, cached_tokens INTEGER, reasoning_tokens INTEGER,
+                tool_name TEXT, tool_call_id TEXT, tool_type TEXT,
+                chat_session_id TEXT, turn_index INTEGER, ttft_ms REAL
+            );
+            CREATE TABLE span_attributes (
+                span_id TEXT NOT NULL REFERENCES spans(span_id) ON DELETE CASCADE,
+                key TEXT NOT NULL, value TEXT,
+                PRIMARY KEY (span_id, key)
+            );
+            CREATE TABLE span_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                span_id TEXT NOT NULL REFERENCES spans(span_id) ON DELETE CASCADE,
+                name TEXT NOT NULL, timestamp_ms INTEGER NOT NULL, attributes TEXT
+            );",
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO spans (span_id, trace_id, name, start_time_ms, end_time_ms, \
+             status_code, chat_session_id) \
+             VALUES ('span1', 'trace1', 'chat', 1000.16, 2000.35, 0, 'session1')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO spans (span_id, trace_id, name, start_time_ms, end_time_ms, \
+             status_code, chat_session_id) \
+             VALUES ('span2', 'trace1', 'chat', 2000.50, 3000.94, 0, 'session1')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        // First read: get both spans
+        let watermark: Box<dyn WatermarkStrategy> = Box::new(TimestampCursorWatermark::initial());
+        let batch = read_otel_spans_incremental(&db_path, watermark, 100).unwrap();
+        assert_eq!(batch.events.len(), 2);
+
+        // Watermark should store the exact fractional value
+        let new_wm = batch
+            .new_watermark
+            .as_any()
+            .downcast_ref::<TimestampCursorWatermark>()
+            .unwrap();
+        assert_eq!(new_wm.timestamp_millis, 3000.94);
+        assert_eq!(new_wm.last_id, "span2");
+
+        // Second read with advanced watermark: should get 0 spans (not loop forever)
+        let batch2 = read_otel_spans_incremental(&db_path, batch.new_watermark, 100).unwrap();
+        assert_eq!(batch2.events.len(), 0);
+    }
+
+    #[test]
+    fn test_fractional_real_watermark_roundtrip_prevents_reread() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("traces.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE spans (
+                span_id TEXT PRIMARY KEY, trace_id TEXT NOT NULL, parent_span_id TEXT,
+                name TEXT NOT NULL, start_time_ms REAL NOT NULL, end_time_ms REAL NOT NULL,
+                status_code INTEGER NOT NULL DEFAULT 0, status_message TEXT,
+                operation_name TEXT, provider_name TEXT, agent_name TEXT, conversation_id TEXT,
+                request_model TEXT, response_model TEXT,
+                input_tokens INTEGER, output_tokens INTEGER, cached_tokens INTEGER, reasoning_tokens INTEGER,
+                tool_name TEXT, tool_call_id TEXT, tool_type TEXT,
+                chat_session_id TEXT, turn_index INTEGER, ttft_ms REAL
+            );
+            CREATE TABLE span_attributes (
+                span_id TEXT NOT NULL REFERENCES spans(span_id) ON DELETE CASCADE,
+                key TEXT NOT NULL, value TEXT,
+                PRIMARY KEY (span_id, key)
+            );
+            CREATE TABLE span_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                span_id TEXT NOT NULL REFERENCES spans(span_id) ON DELETE CASCADE,
+                name TEXT NOT NULL, timestamp_ms INTEGER NOT NULL, attributes TEXT
+            );",
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO spans (span_id, trace_id, name, start_time_ms, end_time_ms, \
+             status_code, chat_session_id) \
+             VALUES ('span-frac', 'trace1', 'chat', 1780519329188.16, 1780519329188.35, 0, 'session1')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        // Read the span
+        let watermark: Box<dyn WatermarkStrategy> = Box::new(TimestampCursorWatermark::initial());
+        let batch = read_otel_spans_incremental(&db_path, watermark, 100).unwrap();
+        assert_eq!(batch.events.len(), 1);
+
+        // Simulate serialization roundtrip (as would happen when persisted to streams DB)
+        let wm = batch
+            .new_watermark
+            .as_any()
+            .downcast_ref::<TimestampCursorWatermark>()
+            .unwrap();
+        let serialized = wm.serialize();
+        let deserialized = TimestampCursorWatermark::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.timestamp_millis, 1780519329188.35);
+
+        // Re-read with roundtripped watermark: must NOT re-read the same span
+        let restored_wm: Box<dyn WatermarkStrategy> = Box::new(deserialized);
+        let batch2 = read_otel_spans_incremental(&db_path, restored_wm, 100).unwrap();
+        assert_eq!(batch2.events.len(), 0);
     }
 }

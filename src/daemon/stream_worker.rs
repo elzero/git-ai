@@ -188,8 +188,8 @@ impl StreamWorker {
             tokio::select! {
                 _ = self.shutdown_notify.notified() => {
                     tracing::info!("transcript worker received shutdown signal");
-                    self.shutdown_flag.store(true, Ordering::Relaxed);
                     self.drain_immediate_tasks().await;
+                    self.shutdown_flag.store(true, Ordering::Relaxed);
                     break;
                 }
                 _ = processing_ticker.tick() => {
@@ -882,6 +882,9 @@ impl StreamWorker {
             const BACKPRESSURE_MAX_WAITS: usize = 40;
             for _ in 0..BACKPRESSURE_MAX_WAITS {
                 if telemetry.metrics_buffer_len() < BACKPRESSURE_THRESHOLD {
+                    break;
+                }
+                if shutdown_flag.load(Ordering::Relaxed) {
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));

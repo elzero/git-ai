@@ -680,6 +680,10 @@ fn wait_for_daemon_dead(config: &DaemonConfig, timeout: Duration) -> bool {
 /// Wait for a process to exit, force-killing it if it doesn't die within timeout.
 /// This handles the case where the daemon lock/sockets are gone but the process
 /// is still alive (e.g. tokio runtime draining blocking tasks).
+///
+/// Note: relies on PID liveness only. Theoretically susceptible to PID reuse if
+/// the process is reaped and the PID recycled within the timeout window, but on
+/// macOS/Linux with ~100k PID space this is not a realistic concern.
 #[cfg(unix)]
 fn wait_for_process_exit(pid: u32, timeout: Duration) {
     let deadline = Instant::now() + timeout;
