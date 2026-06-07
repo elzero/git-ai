@@ -8,6 +8,7 @@ import com.intellij.openapi.components.service
 import com.intellij.openapi.diagnostic.thisLogger
 import com.posthog.java.HttpSender
 import com.posthog.java.PostHog as PostHogClient
+import com.posthog.java.PostHogLogger
 import com.posthog.java.QueueManager
 import com.posthog.java.Sender
 import com.posthog.java.shaded.org.json.JSONObject
@@ -92,8 +93,13 @@ class TelemetryService : Disposable {
                 return
             }
 
+            // Silence PostHog's JUL logger as a safety net — prevents any
+            // SEVERE-level log from reaching IntelliJ's error dialog bridge.
+            silencePostHogJulLogger()
+
             val httpSender = HttpSender.Builder(POSTHOG_API_KEY)
                 .host(POSTHOG_HOST)
+                .logger(SilentPostHogLogger)
                 .build()
             val safeSender = SafeSender(httpSender)
             val queueManager = QueueManager.Builder(safeSender).build()
@@ -104,6 +110,38 @@ class TelemetryService : Disposable {
             logger.info("PostHog initialized with distinct_id: $distinctId")
         } catch (e: Exception) {
             logger.warn("Failed to initialize PostHog: ${e.message}")
+        }
+    }
+
+    /**
+     * No-op PostHogLogger that replaces DefaultPostHogLogger to prevent
+     * PostHog's internal error logging from triggering IntelliJ's IDE
+     * Internal Errors dialog.
+     *
+     * Root cause: HttpSender.send() catches IOException internally and logs
+     * via DefaultPostHogLogger → java.util.logging.Logger.log(Level.SEVERE, ...)
+     * IntelliJ bridges JUL SEVERE to Logger.error() which shows the error
+     * dialog. The SafeSender wrapper never sees these exceptions because
+     * they are caught and logged inside HttpSender before reaching it.
+     */
+    private object SilentPostHogLogger : PostHogLogger {
+        override fun debug(message: String) {}
+        override fun info(message: String) {}
+        override fun warn(message: String) {}
+        override fun error(message: String) {}
+        override fun error(message: String, throwable: Throwable) {}
+    }
+
+    /**
+     * Silences the JUL logger used by PostHog's DefaultPostHogLogger as
+     * a belt-and-suspenders safety net alongside SilentPostHogLogger.
+     */
+    private fun silencePostHogJulLogger() {
+        try {
+            java.util.logging.Logger.getLogger("com.posthog.java.PostHog").level =
+                java.util.logging.Level.OFF
+        } catch (_: Throwable) {
+            // Best effort — ignore if JUL manipulation fails
         }
     }
 
