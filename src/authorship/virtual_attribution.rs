@@ -6,7 +6,7 @@ use crate::authorship::hunk_shift::{DiffHunk, apply_hunk_shifts_to_line_attribut
 use crate::authorship::working_log::CheckpointKind;
 use crate::commands::blame::{GitAiBlameOptions, OLDEST_AI_BLAME_DATE};
 use crate::error::GitAiError;
-use crate::git::repository::{Repository, exec_git_allow_nonzero};
+use crate::git::repository::Repository;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1491,55 +1491,6 @@ fn get_file_content_at_parent(
     }
 }
 
-fn git_merge_file_contents(
-    base_content: &str,
-    committed_content: &str,
-    observed_content: &str,
-) -> Result<String, GitAiError> {
-    let unique = format!(
-        "git-ai-merge-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    );
-    let temp_dir = std::env::temp_dir().join(unique);
-    std::fs::create_dir(&temp_dir)?;
-
-    let current_path = temp_dir.join("current");
-    let base_path = temp_dir.join("base");
-    let other_path = temp_dir.join("other");
-
-    let result = (|| {
-        std::fs::write(&current_path, committed_content)?;
-        std::fs::write(&base_path, base_content)?;
-        std::fs::write(&other_path, observed_content)?;
-
-        let args = vec![
-            "merge-file".to_string(),
-            "--theirs".to_string(),
-            "-p".to_string(),
-            current_path.to_string_lossy().to_string(),
-            base_path.to_string_lossy().to_string(),
-            other_path.to_string_lossy().to_string(),
-        ];
-        let output = exec_git_allow_nonzero(&args)?;
-        if !output.status.success() {
-            return Err(GitAiError::GitCliError {
-                code: output.status.code(),
-                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-                args,
-            });
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    })();
-
-    let _ = std::fs::remove_dir_all(&temp_dir);
-    result
-}
-
 fn merged_carryover_content(
     repo: &Repository,
     parent_sha: &str,
@@ -1566,7 +1517,195 @@ fn merged_carryover_content(
         return Ok(committed_content);
     }
 
-    git_merge_file_contents(&parent_content, &committed_content, observed_content)
+    Ok(carryover_merge_content(
+        &parent_content,
+        &committed_content,
+        observed_content,
+    ))
+}
+
+/// In-memory 3-way line merge replacing a per-file `git merge-file --theirs -p
+/// <committed> <parent> <observed>` spawn (base = `parent`, "ours" =
+/// `committed`, favored "theirs" = `observed`). Implements the standard diff3
+/// chunk algorithm: align both sides to the base, walk base regions, take the
+/// changed side for one-sided changes, and resolve two-sided (conflicting)
+/// changes to the observed side. The result feeds an in-memory diff for line
+/// bucketing (not stored as an authoritative blob), so byte-exact parity with
+/// git's conflict formatting is not required — only a faithful clean-merge
+/// reconstruction. Keeps the carryover snapshot build free of per-file spawns.
+fn carryover_merge_content(parent: &str, committed: &str, observed: &str) -> String {
+    use crate::authorship::imara_diff_utils::{DiffOp, capture_diff_slices};
+
+    if committed == observed {
+        return observed.to_string();
+    }
+    if parent == committed {
+        return observed.to_string();
+    }
+    if parent == observed {
+        return committed.to_string();
+    }
+
+    let base_lines = split_lines_preserving_terminators(parent);
+    let committed_lines = split_lines_preserving_terminators(committed);
+    let observed_lines = split_lines_preserving_terminators(observed);
+
+    // For each side, map every base line index to its aligned index on that
+    // side (None if the base line was changed/deleted on that side). Also record
+    // each side's content so we can emit it for changed chunks.
+    fn align_to_base(base_len: usize, base: &[&str], side: &[&str]) -> Vec<Option<usize>> {
+        let mut map = vec![None; base_len];
+        for op in capture_diff_slices(base, side) {
+            if let DiffOp::Equal {
+                old_index,
+                new_index,
+                len,
+            } = op
+            {
+                for k in 0..len {
+                    map[old_index + k] = Some(new_index + k);
+                }
+            }
+        }
+        map
+    }
+
+    let committed_map = align_to_base(base_lines.len(), &base_lines, &committed_lines);
+    let observed_map = align_to_base(base_lines.len(), &base_lines, &observed_lines);
+
+    // A base line is "stable" when both sides keep it aligned (unchanged on
+    // both). We walk base lines; runs of stable lines are emitted verbatim,
+    // and the gaps between them are chunks where at least one side changed.
+    // Within each chunk we also consume the corresponding side lines (between
+    // the surrounding stable anchors) so inserts/edits are captured.
+    let mut result: Vec<String> = Vec::new();
+    let mut base_i = 0usize;
+    let mut committed_i = 0usize; // next unconsumed committed line
+    let mut observed_i = 0usize; // next unconsumed observed line
+
+    // Helper: is base line `i` stable (aligned on both sides)?
+    let is_stable = |i: usize| committed_map[i].is_some() && observed_map[i].is_some();
+
+    while base_i < base_lines.len() {
+        if is_stable(base_i) {
+            // Emit any side-only insertions that occur before this anchor, then
+            // the stable line itself. The anchor's side positions:
+            let c_anchor = committed_map[base_i].unwrap();
+            let o_anchor = observed_map[base_i].unwrap();
+
+            // Lines inserted on each side before the anchor (relative to last
+            // consumed position) belong to the preceding chunk; but if we reach
+            // a stable line directly we still must flush pending inserts.
+            // committed pending inserts:
+            let c_pending: Vec<String> = if committed_i < c_anchor {
+                committed_lines[committed_i..c_anchor]
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let o_pending: Vec<String> = if observed_i < o_anchor {
+                observed_lines[observed_i..o_anchor]
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            // Resolve pending region: if both sides inserted differing content,
+            // favor observed; else take whichever inserted.
+            if !c_pending.is_empty() && !o_pending.is_empty() {
+                if c_pending == o_pending {
+                    result.extend(c_pending);
+                } else {
+                    result.extend(o_pending);
+                }
+            } else if !c_pending.is_empty() {
+                result.extend(c_pending);
+            } else if !o_pending.is_empty() {
+                result.extend(o_pending);
+            }
+
+            result.push(base_lines[base_i].to_string());
+            committed_i = c_anchor + 1;
+            observed_i = o_anchor + 1;
+            base_i += 1;
+        } else {
+            // Start of a change chunk: advance base over all non-stable lines.
+            let chunk_base_start = base_i;
+            while base_i < base_lines.len() && !is_stable(base_i) {
+                base_i += 1;
+            }
+            // The next stable anchor (or end) bounds how far each side consumes.
+            let (c_anchor, o_anchor) = if base_i < base_lines.len() {
+                (
+                    committed_map[base_i].unwrap(),
+                    observed_map[base_i].unwrap(),
+                )
+            } else {
+                (committed_lines.len(), observed_lines.len())
+            };
+
+            let committed_chunk: Vec<String> = committed_lines[committed_i..c_anchor]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect();
+            let observed_chunk: Vec<String> = observed_lines[observed_i..o_anchor]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect();
+
+            // Determine which sides changed this base region relative to base.
+            let base_chunk: Vec<String> = base_lines[chunk_base_start..base_i]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect();
+            let committed_changed = committed_chunk != base_chunk;
+            let observed_changed = observed_chunk != base_chunk;
+
+            match (committed_changed, observed_changed) {
+                (true, false) => result.extend(committed_chunk),
+                (false, true) => result.extend(observed_chunk),
+                (true, true) => {
+                    // Two-sided change → favor observed (matches --theirs),
+                    // unless both produced identical content.
+                    if committed_chunk == observed_chunk {
+                        result.extend(committed_chunk);
+                    } else {
+                        result.extend(observed_chunk);
+                    }
+                }
+                (false, false) => result.extend(base_chunk),
+            }
+
+            committed_i = c_anchor;
+            observed_i = o_anchor;
+        }
+    }
+
+    // Flush any trailing inserts past the last base line on each side.
+    let c_tail: Vec<String> = committed_lines[committed_i..]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    let o_tail: Vec<String> = observed_lines[observed_i..]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    if !c_tail.is_empty() && !o_tail.is_empty() {
+        if c_tail == o_tail {
+            result.extend(c_tail);
+        } else {
+            result.extend(o_tail);
+        }
+    } else if !c_tail.is_empty() {
+        result.extend(c_tail);
+    } else if !o_tail.is_empty() {
+        result.extend(o_tail);
+    }
+
+    result.concat()
 }
 
 fn mapped_line_range(
@@ -3330,6 +3469,153 @@ mod tests {
         assert_eq!(
             checkout_merge_rebased_content("base\n", "base\n", "ai\n"),
             "ai\n"
+        );
+    }
+
+    /// Characterization: the in-memory 3-way merge used to build the carryover
+    /// snapshot must produce the same result the previous `git merge-file
+    /// --theirs -p <committed> <parent> <observed>` spawn produced, so that the
+    /// per-file `git merge-file` process can be eliminated. Roles:
+    /// base = parent, "ours/current" = committed, "theirs" (favored) = observed.
+    #[test]
+    fn carryover_merge_non_overlapping_changes_combines_both_sides() {
+        // parent has 3 lines; committed edits line 1; observed edits line 3.
+        // Non-overlapping edits on each side both survive.
+        let parent = "a\nb\nc\n";
+        let committed = "A\nb\nc\n";
+        let observed = "a\nb\nC\n";
+        assert_eq!(
+            carryover_merge_content(parent, committed, observed),
+            "A\nb\nC\n"
+        );
+    }
+
+    #[test]
+    fn carryover_merge_overlapping_conflict_favors_observed() {
+        // Both sides edit the same line differently → `--theirs` keeps observed.
+        let parent = "shared\n";
+        let committed = "COMMITTED\n";
+        let observed = "OBSERVED\n";
+        assert_eq!(
+            carryover_merge_content(parent, committed, observed),
+            "OBSERVED\n"
+        );
+    }
+
+    #[test]
+    fn carryover_merge_committed_only_change_keeps_committed() {
+        // observed == parent (no working-tree change) → committed side wins.
+        let parent = "a\nb\n";
+        let committed = "a\nB\n";
+        let observed = "a\nb\n";
+        assert_eq!(
+            carryover_merge_content(parent, committed, observed),
+            "a\nB\n"
+        );
+    }
+
+    #[test]
+    fn carryover_merge_observed_only_change_keeps_observed() {
+        // committed == parent (commit didn't touch file) → observed side wins.
+        let parent = "a\nb\n";
+        let committed = "a\nb\n";
+        let observed = "a\nB\n";
+        assert_eq!(
+            carryover_merge_content(parent, committed, observed),
+            "a\nB\n"
+        );
+    }
+
+    /// Differential test: the in-memory carryover merge must agree with real
+    /// `git merge-file --theirs -p <committed> <parent> <observed>` across many
+    /// pseudo-random 3-way inputs that produce a clean (non-conflicting) merge.
+    /// (When git emits conflict markers the two are allowed to differ, since the
+    /// in-memory version deterministically favors observed; we focus on the
+    /// clean cases that dominate real carryover snapshots and assert exact
+    /// agreement there.)
+    #[test]
+    fn carryover_merge_matches_git_merge_file_on_random_clean_merges() {
+        fn run_git_merge_file(parent: &str, committed: &str, observed: &str) -> Option<String> {
+            let dir = std::env::temp_dir().join(format!(
+                "git-ai-mf-difftest-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).ok()?;
+            let cp = dir.join("committed");
+            let pp = dir.join("parent");
+            let op = dir.join("observed");
+            std::fs::write(&cp, committed).ok()?;
+            std::fs::write(&pp, parent).ok()?;
+            std::fs::write(&op, observed).ok()?;
+            let output = std::process::Command::new("git")
+                .args([
+                    "merge-file",
+                    "--theirs",
+                    "-p",
+                    &cp.to_string_lossy(),
+                    &pp.to_string_lossy(),
+                    &op.to_string_lossy(),
+                ])
+                .output()
+                .ok()?;
+            let _ = std::fs::remove_dir_all(&dir);
+            // Non-zero with conflict markers → skip (clean merges return 0).
+            if !output.status.success() {
+                return None;
+            }
+            Some(String::from_utf8_lossy(&output.stdout).to_string())
+        }
+
+        // Deterministic LCG so the test is reproducible without rand.
+        let mut state: u64 = 0x9E3779B97F4A7C15;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as u32
+        };
+
+        let mut compared = 0;
+        for _ in 0..600 {
+            let n = (next() % 6) as usize + 1; // 1..=6 base lines
+            let base: Vec<String> = (0..n).map(|i| format!("line{i}\n")).collect();
+            // Each side independently keeps / edits / deletes each base line, and
+            // may append a tail line.
+            let mutate = |seed: &mut dyn FnMut() -> u32| -> String {
+                let mut out = String::new();
+                for (i, line) in base.iter().enumerate() {
+                    match seed() % 4 {
+                        0 => out.push_str(line),                                 // keep
+                        1 => out.push_str(&format!("edit{i}_{}\n", seed() % 3)), // edit
+                        2 => {}                                                  // delete
+                        _ => out.push_str(line),                                 // keep
+                    }
+                }
+                if seed() % 3 == 0 {
+                    out.push_str("tail\n");
+                }
+                out
+            };
+            let parent: String = base.concat();
+            let committed = mutate(&mut next);
+            let observed = mutate(&mut next);
+
+            if let Some(git_result) = run_git_merge_file(&parent, &committed, &observed) {
+                let ours = carryover_merge_content(&parent, &committed, &observed);
+                assert_eq!(
+                    ours, git_result,
+                    "in-memory carryover merge diverged from git merge-file (clean merge)\nparent={parent:?}\ncommitted={committed:?}\nobserved={observed:?}"
+                );
+                compared += 1;
+            }
+        }
+        assert!(
+            compared > 50,
+            "expected to compare a meaningful number of clean merges, got {compared}"
         );
     }
 

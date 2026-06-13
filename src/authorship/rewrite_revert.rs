@@ -10,99 +10,268 @@ use crate::error::GitAiError;
 use crate::git::notes_api;
 use crate::git::repository::{Repository, exec_git};
 
-/// Handle a `git revert` commit by reconstructing attribution for re-introduced lines.
-///
-/// Uses `git-ai blame` on the grandparent to determine correct attribution for
-/// lines that the revert re-introduces. This ensures human-overridden lines are
-/// correctly identified as human even if older commits had AI attestation.
-pub fn handle_revert_commit(
-    repo: &Repository,
-    revert_commit: &str,
-    parent: Option<&str>,
-    reverted_commit: Option<&str>,
-) -> Result<(), GitAiError> {
-    let parent_sha = match parent {
-        Some(p) if !p.is_empty() => p.to_string(),
-        _ => {
-            let mut args = repo.global_args_for_exec();
-            args.extend_from_slice(&["rev-parse".to_string(), format!("{}~1", revert_commit)]);
-            let output = exec_git(&args)?;
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
-        }
-    };
+/// One reverted commit to reconstruct: the new revert commit, its parent, and
+/// the original commit that was reverted (used to locate the source note).
+pub struct RevertSpec {
+    pub revert_commit: String,
+    pub parent: Option<String>,
+    pub reverted_commit: Option<String>,
+}
 
-    let source_base_sha = if let Some(reverted_commit) = reverted_commit {
-        match first_parent_sha(repo, reverted_commit) {
-            Ok(parent) => parent,
-            Err(_) => return Ok(()),
-        }
-    } else {
-        // Compatibility for older normalized commands that did not carry the
-        // reverted source commit. This is only correct for `git revert HEAD`.
-        match first_parent_sha(repo, &parent_sha) {
-            Ok(parent) => parent,
-            Err(_) => return Ok(()),
-        }
-    };
-
-    if source_base_sha.is_empty() {
+/// Batched revert-attribution reconstruction for one `git revert A B C ...`
+/// invocation. Performs a CONSTANT number of git spawns regardless of how many
+/// commits were reverted: one batched first-parent rev-parse, one batched note
+/// read, one batched diff-tree (covering every commit's two diff pairs), and one
+/// batched note write. All per-commit work below is pure in-memory.
+pub fn handle_revert_commits(repo: &Repository, specs: &[RevertSpec]) -> Result<(), GitAiError> {
+    if specs.is_empty() {
         return Ok(());
     }
 
-    // Find lines added by the revert relative to its parent
-    let added_lines = repo.diff_added_lines(&parent_sha, revert_commit, None)?;
-    if added_lines.is_empty() {
-        return Ok(());
+    // Resolve every spec's parent_sha (only those missing need a lookup) and the
+    // source_base_sha (= first parent of the reverted commit, or of the parent
+    // for the legacy HEAD-only path). Batch all the required `<sha>^1` /
+    // `<sha>~1` resolutions into a single rev-parse.
+    struct Resolved {
+        revert_commit: String,
+        parent_sha: String,
+        source_base_sha: String,
     }
 
-    let notes = notes_api::read_notes_batch(repo, std::slice::from_ref(&source_base_sha))?;
-    let Some(source_note) = notes.get(&source_base_sha) else {
-        return Ok(());
+    // Collect the revspecs we need resolved, deduplicated.
+    let mut to_resolve: Vec<String> = Vec::new();
+    let push_unique = |spec: String, acc: &mut Vec<String>| {
+        if !acc.contains(&spec) {
+            acc.push(spec);
+        }
     };
-    let mut log = AuthorshipLog::deserialize_from_string(source_note)
-        .map_err(|error| GitAiError::Generic(format!("invalid source revert note: {}", error)))?;
-
-    let diff_results = compute_diff_trees_batch(
-        repo,
-        &[(source_base_sha.clone(), revert_commit.to_string())],
-    )?;
-    let Some(diff_result) = diff_results.first() else {
-        return Ok(());
-    };
-    for (old_path, new_path) in &diff_result.renames {
-        for attestation in &mut log.attestations {
-            if attestation.file_path == *old_path {
-                attestation.file_path = new_path.clone();
+    for spec in specs {
+        if spec.parent.as_deref().unwrap_or("").is_empty() {
+            push_unique(format!("{}~1", spec.revert_commit), &mut to_resolve);
+        }
+        match spec.reverted_commit.as_deref() {
+            Some(rc) if !rc.is_empty() => push_unique(format!("{}^1", rc), &mut to_resolve),
+            _ => {
+                // Legacy path resolves first-parent of the (resolved) parent;
+                // handled after parents are known, below.
             }
         }
     }
-    if !diff_result.hunks_by_file.is_empty() {
-        log.attestations = log
-            .attestations
-            .iter()
-            .filter_map(|fa| match diff_result.hunks_by_file.get(&fa.file_path) {
-                Some(hunks) => apply_hunk_shifts_to_file_attestation(fa, hunks),
-                None => Some(fa.clone()),
-            })
-            .collect();
+    let resolved_revspecs = batch_rev_parse_verify(repo, &to_resolve)?;
+
+    // Second pass: some legacy specs need first-parent of the parent_sha, which
+    // itself may have just been resolved. Resolve those in a second batch.
+    let mut resolved: Vec<Resolved> = Vec::new();
+    let mut legacy_parent_firstparent: Vec<String> = Vec::new();
+    for spec in specs {
+        let parent_sha = match spec.parent.as_deref() {
+            Some(p) if !p.is_empty() => p.to_string(),
+            _ => resolved_revspecs
+                .get(&format!("{}~1", spec.revert_commit))
+                .cloned()
+                .unwrap_or_default(),
+        };
+        if parent_sha.is_empty() {
+            continue;
+        }
+        match spec.reverted_commit.as_deref() {
+            Some(rc) if !rc.is_empty() => {
+                let source_base_sha = resolved_revspecs
+                    .get(&format!("{}^1", rc))
+                    .cloned()
+                    .unwrap_or_default();
+                resolved.push(Resolved {
+                    revert_commit: spec.revert_commit.clone(),
+                    parent_sha,
+                    source_base_sha,
+                });
+            }
+            _ => {
+                push_unique(format!("{}^1", parent_sha), &mut legacy_parent_firstparent);
+                resolved.push(Resolved {
+                    revert_commit: spec.revert_commit.clone(),
+                    parent_sha,
+                    // Placeholder; filled from the second batch below.
+                    source_base_sha: String::new(),
+                });
+            }
+        }
+    }
+    if !legacy_parent_firstparent.is_empty() {
+        let legacy_resolved = batch_rev_parse_verify(repo, &legacy_parent_firstparent)?;
+        for r in &mut resolved {
+            if r.source_base_sha.is_empty() {
+                r.source_base_sha = legacy_resolved
+                    .get(&format!("{}^1", r.parent_sha))
+                    .cloned()
+                    .unwrap_or_default();
+            }
+        }
     }
 
-    log.metadata.base_commit_sha = revert_commit.to_string();
-    log.attestations = log
-        .attestations
-        .iter()
-        .filter_map(|file| clip_file_attestation_to_lines(file, &added_lines))
-        .collect();
-    if log.attestations.is_empty() {
+    resolved.retain(|r| !r.source_base_sha.is_empty());
+    if resolved.is_empty() {
         return Ok(());
     }
 
-    let note_str = log.serialize_to_string().map_err(|_| {
-        GitAiError::Generic("Failed to serialize revert authorship log".to_string())
-    })?;
+    // Batch-read all source notes in one call.
+    let source_base_shas: Vec<String> = {
+        let mut v: Vec<String> = resolved.iter().map(|r| r.source_base_sha.clone()).collect();
+        v.sort();
+        v.dedup();
+        v
+    };
+    let notes = notes_api::read_notes_batch(repo, &source_base_shas)?;
 
-    notes_api::write_notes_batch(repo, &[(revert_commit.to_string(), note_str)])?;
+    // Build one batched diff-tree request covering, for each reverted commit:
+    //  - (source_base, revert_commit): hunks to shift the source note forward,
+    //  - (parent, revert_commit): added lines re-introduced by the revert.
+    // Track each pair's index so we can read its result back.
+    let mut diff_pairs: Vec<(String, String)> = Vec::new();
+    let mut shift_idx: Vec<Option<usize>> = Vec::new();
+    let mut added_idx: Vec<usize> = Vec::new();
+    for r in &resolved {
+        // Only need the shift pair if the source note exists.
+        let shift = if notes.contains_key(&r.source_base_sha) {
+            let idx = diff_pairs.len();
+            diff_pairs.push((r.source_base_sha.clone(), r.revert_commit.clone()));
+            Some(idx)
+        } else {
+            None
+        };
+        shift_idx.push(shift);
+        let aidx = diff_pairs.len();
+        diff_pairs.push((r.parent_sha.clone(), r.revert_commit.clone()));
+        added_idx.push(aidx);
+    }
+    let diff_results = compute_diff_trees_batch(repo, &diff_pairs)?;
+
+    // Per-commit reconstruction is now pure in-memory.
+    let mut writes: Vec<(String, String)> = Vec::new();
+    for (i, r) in resolved.iter().enumerate() {
+        let Some(shift) = shift_idx[i] else {
+            continue;
+        };
+        let Some(source_note) = notes.get(&r.source_base_sha) else {
+            continue;
+        };
+        let Ok(mut log) = AuthorshipLog::deserialize_from_string(source_note) else {
+            continue;
+        };
+
+        // Added lines re-introduced by the revert (new-side hunk ranges of the
+        // parent->revert diff), keyed by file.
+        let added_lines = added_lines_from_diff_result(&diff_results[added_idx[i]]);
+        if added_lines.is_empty() {
+            continue;
+        }
+
+        let shift_result = &diff_results[shift];
+        for (old_path, new_path) in &shift_result.renames {
+            for attestation in &mut log.attestations {
+                if attestation.file_path == *old_path {
+                    attestation.file_path = new_path.clone();
+                }
+            }
+        }
+        if !shift_result.hunks_by_file.is_empty() {
+            log.attestations = log
+                .attestations
+                .iter()
+                .filter_map(|fa| match shift_result.hunks_by_file.get(&fa.file_path) {
+                    Some(hunks) => apply_hunk_shifts_to_file_attestation(fa, hunks),
+                    None => Some(fa.clone()),
+                })
+                .collect();
+        }
+
+        log.metadata.base_commit_sha = r.revert_commit.clone();
+        log.attestations = log
+            .attestations
+            .iter()
+            .filter_map(|file| clip_file_attestation_to_lines(file, &added_lines))
+            .collect();
+        if log.attestations.is_empty() {
+            continue;
+        }
+
+        let Ok(note_str) = log.serialize_to_string() else {
+            continue;
+        };
+        writes.push((r.revert_commit.clone(), note_str));
+    }
+
+    if !writes.is_empty() {
+        notes_api::write_notes_batch(repo, &writes)?;
+    }
     Ok(())
+}
+
+/// Extract added line numbers per file from a diff-tree result, equivalent to
+/// the new-side coverage `diff_added_lines` would report for the same pair.
+fn added_lines_from_diff_result(
+    result: &crate::authorship::rewrite::DiffTreeResult,
+) -> HashMap<String, Vec<u32>> {
+    let mut added: HashMap<String, Vec<u32>> = HashMap::new();
+    for (file, hunks) in &result.hunks_by_file {
+        let mut lines = Vec::new();
+        for hunk in hunks {
+            for line in hunk.new_start..hunk.new_start + hunk.new_count {
+                if line > 0 {
+                    lines.push(line);
+                }
+            }
+        }
+        if !lines.is_empty() {
+            added.insert(file.clone(), lines);
+        }
+    }
+    added
+}
+
+/// Batch `git rev-parse --verify <revspec>...` for many revspecs in one spawn.
+/// Returns a map from input revspec → resolved OID (only successful entries).
+fn batch_rev_parse_verify(
+    repo: &Repository,
+    revspecs: &[String],
+) -> Result<HashMap<String, String>, GitAiError> {
+    let mut out = HashMap::new();
+    if revspecs.is_empty() {
+        return Ok(out);
+    }
+    let mut args = repo.global_args_for_exec();
+    args.push("rev-parse".to_string());
+    args.push("--verify".to_string());
+    for spec in revspecs {
+        args.push(spec.clone());
+    }
+    // rev-parse prints one resolved OID per input line, in order. If any fails,
+    // it errors out; fall back to per-spec resolution only for the failures.
+    if let Ok(output) = exec_git(&args) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let oids: Vec<&str> = stdout.lines().collect();
+        if oids.len() == revspecs.len() {
+            for (spec, oid) in revspecs.iter().zip(oids) {
+                out.insert(spec.clone(), oid.trim().to_string());
+            }
+            return Ok(out);
+        }
+    }
+    // Fallback: resolve individually so one bad revspec doesn't drop the rest.
+    // This is bounded by the (rare) failure case, not the common path.
+    for spec in revspecs {
+        let mut a = repo.global_args_for_exec();
+        a.push("rev-parse".to_string());
+        a.push("--verify".to_string());
+        a.push(spec.clone());
+        if let Ok(output) = exec_git(&a) {
+            let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !oid.is_empty() {
+                out.insert(spec.clone(), oid);
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn clip_file_attestation_to_lines(
@@ -135,15 +304,4 @@ fn clip_file_attestation_to_lines(
         file_path: file.file_path.clone(),
         entries,
     })
-}
-
-fn first_parent_sha(repo: &Repository, commit_sha: &str) -> Result<String, GitAiError> {
-    let mut args = repo.global_args_for_exec();
-    args.extend_from_slice(&[
-        "rev-parse".to_string(),
-        "--verify".to_string(),
-        format!("{}^1", commit_sha),
-    ]);
-    let output = exec_git(&args)?;
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }

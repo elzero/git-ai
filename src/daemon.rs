@@ -1382,15 +1382,18 @@ fn apply_revert_complete_rewrite(
     repo: &crate::git::repository::Repository,
     cmd: &crate::daemon::domain::NormalizedCommand,
 ) -> Result<(), GitAiError> {
-    for (index, change) in revert_destination_changes(cmd).into_iter().enumerate() {
-        crate::authorship::rewrite_revert::handle_revert_commit(
-            repo,
-            &change.new,
-            Some(&change.old),
-            cmd.revert_source_oids.get(index).map(String::as_str),
-        )?;
-    }
-    Ok(())
+    let specs: Vec<crate::authorship::rewrite_revert::RevertSpec> = revert_destination_changes(cmd)
+        .into_iter()
+        .enumerate()
+        .map(
+            |(index, change)| crate::authorship::rewrite_revert::RevertSpec {
+                revert_commit: change.new.clone(),
+                parent: Some(change.old.clone()),
+                reverted_commit: cmd.revert_source_oids.get(index).cloned(),
+            },
+        )
+        .collect();
+    crate::authorship::rewrite_revert::handle_revert_commits(repo, &specs)
 }
 
 fn apply_cherry_pick_complete_rewrite(
