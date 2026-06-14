@@ -109,7 +109,7 @@ fn build_debug_report(options: DebugOptions) -> String {
     let platform_info = collect_platform_info();
     let hardware_info = collect_hardware_info();
     let repository_info = collect_repository_info();
-    let git_committer_identity = collect_git_committer_identity_info();
+    let git_committer_identity = collect_git_committer_identity_info(&repository_info);
     let auth_info = collect_auth_status();
     let git_environment = collect_git_environment();
     debug_progress("debug report ready");
@@ -415,15 +415,22 @@ enum RepositoryCommitterIdentity {
     NotInRepository(String),
 }
 
-fn collect_git_committer_identity_info() -> GitCommitterIdentityInfo {
+fn collect_git_committer_identity_info(
+    repository_info: &RepositoryInfo,
+) -> GitCommitterIdentityInfo {
     let global_config = global_git_config_identity_resolution().map_err(|e| e.to_string());
-    let repository = env::current_dir()
-        .map_err(|e| e.to_string())
-        .and_then(|cwd| find_repository_in_path(&cwd.to_string_lossy()).map_err(|e| e.to_string()))
-        .map(|repo| {
-            RepositoryCommitterIdentity::InRepository(repo.git_author_identity_resolution())
-        })
-        .unwrap_or_else(RepositoryCommitterIdentity::NotInRepository);
+    let repository = repository_info
+        .committer_identity
+        .clone()
+        .map(RepositoryCommitterIdentity::InRepository)
+        .unwrap_or_else(|| {
+            RepositoryCommitterIdentity::NotInRepository(
+                repository_info
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "not in repository".to_string()),
+            )
+        });
 
     GitCommitterIdentityInfo {
         global_config,
@@ -1135,6 +1142,7 @@ struct RepositoryInfo {
     head: Option<String>,
     hooks_path: Option<String>,
     remotes: Vec<(String, String)>,
+    committer_identity: Option<GitIdentityResolution>,
 }
 
 fn collect_repository_info() -> RepositoryInfo {
@@ -1155,11 +1163,13 @@ fn collect_repository_info() -> RepositoryInfo {
                 head: None,
                 hooks_path: None,
                 remotes: Vec::new(),
+                committer_identity: None,
             };
         }
     };
 
     let head = repo.head().ok();
+    let committer_identity = repo.git_author_identity_resolution();
 
     RepositoryInfo {
         in_repository: true,
@@ -1171,6 +1181,7 @@ fn collect_repository_info() -> RepositoryInfo {
         head: head.as_ref().and_then(|h| h.target().ok()),
         hooks_path: repo.config_get_str("core.hooksPath").ok().flatten(),
         remotes: repo.remotes_with_urls().unwrap_or_default(),
+        committer_identity: Some(committer_identity),
     }
 }
 

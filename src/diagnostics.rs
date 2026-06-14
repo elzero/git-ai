@@ -1,11 +1,10 @@
-use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::working_log::CheckpointKind;
+use crate::commands::blame::{BlameAnalysisResult, GitAiBlameOptions};
 use crate::config::Config;
 use crate::daemon::control_api::{ControlRequest, FamilyStatus};
 use crate::diagnostic_sentinels::{
     DEBUG_SELF_CHECK_REMOTE_URL, debug_self_check_root, path_is_in_debug_self_check_root,
 };
-use crate::git::notes_api;
 use crate::git::repository::discover_repository_in_path_no_git_exec;
 use crate::process_timeout::run_command_with_timeout;
 use serde_json::Value;
@@ -415,8 +414,7 @@ pub fn run_attribution_self_check(target: &GitDiagnosticTarget) -> DiagnosticChe
         .trim()
         .to_string();
 
-        let note = poll_authorship_note(&repo_path, &commit_sha, deadline)?;
-        let mut details = validate_self_check_authorship_note(&note)?;
+        let mut details = poll_self_check_attribution(&repo_path, &commit_sha, deadline)?;
         details.insert(0, format!("repo: {}", repo_path.display()));
         details.insert(1, format!("commit: {}", commit_sha));
         details.insert(
@@ -820,20 +818,23 @@ fn read_checkpoint_count(repo_path: &Path) -> Result<usize, String> {
         .map_err(|e| e.to_string())
 }
 
-fn poll_authorship_note(
+fn poll_self_check_attribution(
     repo_path: &Path,
     commit_sha: &str,
     deadline: Instant,
-) -> Result<String, String> {
+) -> Result<Vec<String>, String> {
     let start = Instant::now();
     let repo = discover_repository_in_path_no_git_exec(repo_path).map_err(|e| e.to_string())?;
     let notes_backend = Config::get().notes_backend_kind();
+    let mut last_error = None;
 
     while Instant::now() < deadline {
-        if let Some(note) = notes_api::read_note(&repo, commit_sha)
-            && !note.trim().is_empty()
-        {
-            return Ok(note);
+        match validate_self_check_blame_analysis(
+            repo.blame_analysis(SELF_CHECK_FILE, &self_check_blame_options(commit_sha))
+                .map_err(|e| e.to_string()),
+        ) {
+            Ok(details) => return Ok(details),
+            Err(err) => last_error = Some(err),
         }
 
         if remaining_timeout(deadline).is_zero() {
@@ -843,12 +844,23 @@ fn poll_authorship_note(
     }
 
     Err(format!(
-        "timed out after {:.1}s waiting for authorship note via {} backend for {} in {}",
+        "timed out after {:.1}s waiting for expected attribution via {} backend for {} in {}: {}",
         start.elapsed().as_secs_f64(),
         notes_backend,
         commit_sha,
-        repo_path.display()
+        repo_path.display(),
+        last_error.unwrap_or_else(|| "no blame analysis result available".to_string())
     ))
+}
+
+fn self_check_blame_options(commit_sha: &str) -> GitAiBlameOptions {
+    GitAiBlameOptions {
+        line_ranges: vec![(1, 3)],
+        newest_commit: Some(commit_sha.to_string()),
+        use_prompt_hashes_as_names: true,
+        return_human_authors_as_human: true,
+        ..GitAiBlameOptions::default()
+    }
 }
 
 fn wait_for_daemon_family_status(
@@ -991,10 +1003,10 @@ impl LineClassification {
     }
 }
 
-fn validate_self_check_authorship_note(note: &str) -> Result<Vec<String>, String> {
-    let authorship = AuthorshipLog::deserialize_from_string(note)
-        .map_err(|e| format!("failed to parse authorship note: {}", e))?;
-
+fn validate_self_check_blame_analysis(
+    analysis: Result<BlameAnalysisResult, String>,
+) -> Result<Vec<String>, String> {
+    let analysis = analysis.map_err(|err| format!("blame analysis failed: {}", err))?;
     let expected = [
         (1, LineClassification::Untracked),
         (2, LineClassification::KnownHuman),
@@ -1003,12 +1015,18 @@ fn validate_self_check_authorship_note(note: &str) -> Result<Vec<String>, String
     let mut details = Vec::new();
 
     for (line, expected_class) in expected {
-        let actual = classify_line(&authorship, SELF_CHECK_FILE, line);
+        let actual = classify_line(&analysis, line);
+        let raw_author = analysis
+            .line_authors
+            .get(&line)
+            .cloned()
+            .unwrap_or_else(|| "<missing>".to_string());
         details.push(format!(
-            "line {}: {} (expected {})",
+            "line {}: {} (expected {}, raw={})",
             line,
             actual.as_str(),
-            expected_class.as_str()
+            expected_class.as_str(),
+            raw_author
         ));
         if actual != expected_class {
             return Err(format!(
@@ -1016,61 +1034,51 @@ fn validate_self_check_authorship_note(note: &str) -> Result<Vec<String>, String
                 line,
                 actual.as_str(),
                 expected_class.as_str(),
-                note
+                format_blame_analysis_debug(&analysis)
             ));
         }
     }
 
+    details.push(format_blame_analysis_debug(&analysis));
     Ok(details)
 }
 
-fn classify_line(authorship: &AuthorshipLog, file: &str, line: u32) -> LineClassification {
-    let Some(file_attestation) = authorship
-        .attestations
-        .iter()
-        .find(|attestation| attestation.file_path == file)
-    else {
-        return LineClassification::Untracked;
+fn classify_line(analysis: &BlameAnalysisResult, line: u32) -> LineClassification {
+    let Some(author) = analysis.line_authors.get(&line) else {
+        return LineClassification::Unknown;
     };
 
-    for entry in file_attestation.entries.iter().rev() {
-        if !entry.line_ranges.iter().any(|range| range.contains(line)) {
-            continue;
-        }
-
-        if entry.hash.starts_with("h_") && authorship.metadata.humans.contains_key(&entry.hash) {
-            return LineClassification::KnownHuman;
-        }
-
-        if authorship
-            .metadata
-            .prompts
-            .get(&entry.hash)
-            .is_some_and(|prompt| prompt.agent_id.tool == "mock_ai")
-        {
-            return LineClassification::Ai;
-        }
-
-        if entry.hash.starts_with("s_") {
-            let session_key = entry.hash.split("::").next().unwrap_or(&entry.hash);
-            if authorship
-                .metadata
-                .sessions
-                .get(session_key)
-                .is_some_and(|session| session.agent_id.tool == "mock_ai")
-            {
-                return LineClassification::Ai;
-            }
-        }
-
-        if entry.hash == CheckpointKind::Human.to_str() {
-            return LineClassification::Untracked;
-        }
-
-        return LineClassification::Unknown;
+    if author == &CheckpointKind::Human.to_str() {
+        return LineClassification::Untracked;
     }
 
-    LineClassification::Untracked
+    if author.starts_with("h_") && analysis.humans.contains_key(author) {
+        return LineClassification::KnownHuman;
+    }
+
+    if analysis
+        .prompt_records
+        .get(author)
+        .is_some_and(|prompt| prompt.agent_id.tool == "mock_ai")
+    {
+        return LineClassification::Ai;
+    }
+
+    LineClassification::Unknown
+}
+
+fn format_blame_analysis_debug(analysis: &BlameAnalysisResult) -> String {
+    let mut prompt_keys = analysis.prompt_records.keys().cloned().collect::<Vec<_>>();
+    prompt_keys.sort();
+    let mut session_keys = analysis.session_records.keys().cloned().collect::<Vec<_>>();
+    session_keys.sort();
+    let mut human_keys = analysis.humans.keys().cloned().collect::<Vec<_>>();
+    human_keys.sort();
+
+    format!(
+        "blame analysis: line_authors={:?}, prompt_keys={:?}, session_keys={:?}, human_keys={:?}",
+        analysis.line_authors, prompt_keys, session_keys, human_keys
+    )
 }
 
 #[derive(Debug, Clone, Default)]
