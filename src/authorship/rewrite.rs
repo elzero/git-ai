@@ -237,7 +237,7 @@ fn post_squash_resolution_working_log(
     }
 
     let commit_for_transform = squash_commit.to_string();
-    let author = repo.git_author_identity().formatted_or_unknown();
+    let author = repo.effective_author_identity().formatted_or_unknown();
     crate::authorship::post_commit::post_commit_from_working_log_with_transform_and_options(
         repo,
         Some(onto.to_string()),

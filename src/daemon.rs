@@ -703,7 +703,7 @@ fn process_conflict_resolution_working_logs(
         .map(|(commit_sha, _)| commit_sha.clone())
         .collect::<Vec<_>>();
     let existing_notes = crate::git::notes_api::read_notes_batch(repo, &commit_shas)?;
-    let author = repo.git_author_identity().formatted_or_unknown();
+    let author = repo.effective_author_identity().formatted_or_unknown();
 
     // Only commits whose rebased parent still has a working log incur
     // attribution reconstruction; restrict the (expensive) parent->commit diffs
@@ -1163,7 +1163,7 @@ fn apply_checkout_switch_working_log_side_effect(
             repo.storage.delete_working_log_for_base_commit(&old_head)?;
             return Ok(());
         }
-        let author = repo.git_author_identity().formatted_or_unknown();
+        let author = repo.effective_author_identity().formatted_or_unknown();
         crate::authorship::virtual_attribution::restore_working_log_carryover(
             &repo,
             &old_head,
@@ -1445,7 +1445,7 @@ fn apply_cherry_pick_complete_rewrite(
     }
 
     let existing_notes = crate::git::notes_api::read_notes_batch(repo, new_commits)?;
-    let author = repo.git_author_identity().formatted_or_unknown();
+    let author = repo.effective_author_identity().formatted_or_unknown();
 
     // The cherry-picked commits form a chain: each commit's parent is the
     // previous one (the first's parent is original_head). Build the
@@ -4603,7 +4603,7 @@ impl ActorDaemonCoordinator {
                             }
                         } else if !new_head.is_empty() {
                             let repo = find_repository_in_path(&worktree)?;
-                            let author = repo.git_author_identity().formatted_or_unknown();
+                            let author = repo.effective_author_identity().formatted_or_unknown();
                             let base_opt = base.clone().filter(|b| !b.is_empty() && b != "initial");
 
                             crate::authorship::post_commit::post_commit_from_working_log(
@@ -4646,7 +4646,7 @@ impl ActorDaemonCoordinator {
                             && !is_zero_oid(new_head)
                         {
                             let repo = find_repository_in_path(&worktree)?;
-                            let author = repo.git_author_identity().formatted_or_unknown();
+                            let author = repo.effective_author_identity().formatted_or_unknown();
                             crate::authorship::post_commit::post_commit_amend(
                                 &repo, old_head, new_head, author,
                             )?;
@@ -4748,7 +4748,8 @@ impl ActorDaemonCoordinator {
                             });
                         if affects_checked_out_branch {
                             if repo.storage.has_working_log(old) {
-                                let author = repo.git_author_identity().formatted_or_unknown();
+                                let author =
+                                    repo.effective_author_identity().formatted_or_unknown();
                                 crate::authorship::post_commit::post_commit_from_working_log(
                                     &repo,
                                     Some(old.to_string()),
