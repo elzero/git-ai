@@ -194,7 +194,10 @@ def ensure_git_clone(
     if clone_dir.exists() or clone_dir.is_symlink():
         if clone_dir.is_symlink():
             raise ValueError(f"Refusing to use symlinked Git source path: {clone_dir}")
-        if not (clone_dir / ".git").is_dir():
+        git_dir = clone_dir / ".git"
+        if git_dir.is_symlink():
+            raise ValueError(f"Refusing to use Git source checkout with symlinked .git directory: {clone_dir}")
+        if not git_dir.is_dir():
             raise FileExistsError(f"{clone_dir} exists but is not a Git checkout")
     if not clone_dir.exists():
         clone_dir.parent.mkdir(parents=True, exist_ok=True)

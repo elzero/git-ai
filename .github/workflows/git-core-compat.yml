@@ -70,6 +70,14 @@ jobs:
       - name: Clone git source
         run: |
           set -euo pipefail
+          if [ -L /tmp/git-core-tests ]; then
+            echo "::error::/tmp/git-core-tests is a symlink"
+            exit 1
+          fi
+          if [ -L /tmp/git-core-tests/.git ]; then
+            echo "::error::/tmp/git-core-tests/.git is a symlink"
+            exit 1
+          fi
           if [ ! -d /tmp/git-core-tests/.git ]; then
             if [ -e /tmp/git-core-tests ]; then
               echo "::error::/tmp/git-core-tests exists but is not a Git checkout"
@@ -111,5 +119,9 @@ jobs:
       - name: Clean git source before cache save
         run: |
           set -euo pipefail
+          if [ -L /tmp/git-core-tests ] || [ -L /tmp/git-core-tests/.git ] || [ ! -d /tmp/git-core-tests/.git ]; then
+            echo "::error::/tmp/git-core-tests is not a normal Git checkout"
+            exit 1
+          fi
           git -C /tmp/git-core-tests reset --hard "$GIT_COMPAT_SHA"
           git -C /tmp/git-core-tests clean -ffdx
