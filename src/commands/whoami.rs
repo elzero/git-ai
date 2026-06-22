@@ -200,17 +200,20 @@ fn author_identity_header_status(api_ctx: &ApiContext) -> String {
 
 fn api_key_status(api_key: Option<&str>) -> String {
     api_key
-        .map(|key| format!("connected ({})", mask_api_key(key)))
-        .unwrap_or_else(|| "not configured".to_string())
+        .map(|key| format!("configured ({})", mask_api_key(key)))
+        .unwrap_or_else(|| "unset".to_string())
 }
 
 fn login_status(auth: &AuthStatus, api_client: &ApiClient) -> String {
     match &auth.state {
-        AuthState::LoggedOut => "not connected".to_string(),
-        AuthState::LoggedIn if api_client.is_logged_in() => "connected".to_string(),
-        AuthState::LoggedIn => "connected (access token unavailable)".to_string(),
-        AuthState::RefreshExpired => "not connected (refresh token expired)".to_string(),
-        AuthState::Error(err) => format!("error ({})", err),
+        AuthState::LoggedIn => "logged in".to_string(),
+        AuthState::LoggedOut | AuthState::RefreshExpired | AuthState::Error(_) => {
+            if api_client.has_api_key() {
+                "optional (using api key)".to_string()
+            } else {
+                "not logged in".to_string()
+            }
+        }
     }
 }
 
@@ -335,8 +338,8 @@ mod tests {
         let output = render_whoami(&ctx.base_url, &auth, &ctx, &client, Ok(&metrics), false);
 
         assert!(output.contains("API access: connected via API key"));
-        assert!(output.contains("API key: connected (gita...7890)"));
-        assert!(output.contains("Login: not connected"));
+        assert!(output.contains("API key: configured (gita...7890)"));
+        assert!(output.contains("Login: optional (using api key)"));
         assert!(output.contains("Identity: Alice Example <alice@example.com>"));
         assert!(!output.contains("Author identity header"));
         assert!(!output.contains("Login identity"));
@@ -370,6 +373,8 @@ mod tests {
         let output = render_whoami(&ctx.base_url, &auth, &ctx, &client, Ok(&metrics), true);
 
         assert!(output.contains("API access: connected via login"));
+        assert!(output.contains("API key: unset"));
+        assert!(output.contains("Login: logged in"));
         assert!(output.contains("Identity: not sent"));
         assert!(!output.contains("Author identity header"));
         assert!(output.contains("Login identity"));
@@ -381,6 +386,19 @@ mod tests {
         assert!(output.contains("Events: 12 total, 8 delivered, 4 not delivered"));
         assert!(output.contains("Rows with sync errors: 1"));
         assert!(output.contains("Latest sync error: temporary outage"));
+    }
+
+    #[test]
+    fn render_whoami_shows_unset_api_key_and_not_logged_in() {
+        let auth = auth_status(AuthState::LoggedOut);
+        let ctx = api_context(crate::config::DEFAULT_API_BASE_URL, None, None, None);
+        let client = ApiClient::new(ctx.clone());
+        let metrics = metrics_status();
+
+        let output = render_whoami(&ctx.base_url, &auth, &ctx, &client, Ok(&metrics), false);
+
+        assert!(output.contains("API key: unset"));
+        assert!(output.contains("Login: not logged in"));
     }
 
     #[test]
@@ -412,7 +430,7 @@ mod tests {
         assert!(output.contains(
             "API access: not connected (login credentials found, but no usable access token)"
         ));
-        assert!(output.contains("Login: connected (access token unavailable)"));
+        assert!(output.contains("Login: logged in"));
         assert!(
             output.contains("Metrics delivery: off (default API requires an API key or login)")
         );
