@@ -298,16 +298,26 @@ fn maybe_show_async_post_commit_stats(parsed: &ParsedGitInvocation, repo: &Repos
 }
 
 fn proxy_to_git(args: &[String], exit_on_completion: bool) -> std::process::ExitStatus {
+    let parsed = parse_git_cli_args(args);
+
     // Suppress trace2 for read-only invocations to avoid hitting the daemon
     // with events that can never produce meaningful state changes.
-    let suppress_trace2 = {
-        let parsed = parse_git_cli_args(args);
-        parsed.command.as_deref().is_some_and(|cmd| {
-            crate::git::command_classification::is_definitely_read_only_git_invocation(
-                cmd,
-                &parsed.command_args,
-            )
-        })
+    let suppress_trace2 = parsed.command.as_deref().is_some_and(|cmd| {
+        crate::git::command_classification::is_definitely_read_only_git_invocation(
+            cmd,
+            &parsed.command_args,
+        )
+    });
+
+    // Suppress trace2 for repositories not in the allowlist / in the exclude list.
+    let suppress_trace2 = suppress_trace2 || {
+        let config = config::Config::get();
+        if config.has_repository_filters() {
+            let repo = find_repository(&parsed.global_args).ok();
+            !config.is_allowed_repository(&repo)
+        } else {
+            false
+        }
     };
 
     // Use spawn for interactive commands
